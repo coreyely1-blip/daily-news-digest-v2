@@ -1,28 +1,245 @@
-name: Daily News Digest
+#!/usr/bin/env python3
+"""
+Daily News Digest Generator
+Fetches news articles and sports scores and sends an email digest.
+"""
 
-on:
-  schedule:
-    - cron: '0 8 * * *'
-  workflow_dispatch:
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
+from datetime import datetime
+from typing import List, Dict, Any
 
-jobs:
-  send-digest:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Run news digest generator
-        env:
-          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
-          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-        run: python news_digest_script.py
+class NewsDigestGenerator:
+    def __init__(self):
+        self.news_api_key = os.environ.get('NEWS_API_KEY')
+        self.sender_email = os.environ.get('SENDER_EMAIL')
+        self.sender_password = os.environ.get('SENDER_PASSWORD')
+        self.recipient_email = os.environ.get('RECIPIENT_EMAIL')
+        
+        if not all([self.news_api_key, self.sender_email, self.sender_password, self.recipient_email]):
+            raise ValueError("Missing required environment variables")
+    
+    def fetch_news(self, query: str, num_articles: int = 5) -> List[Dict[str, Any]]:
+        """Fetch news articles from NewsAPI"""
+        try:
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                'q': query,
+                'sortBy': 'popularity',
+                'language': 'en',
+                'pageSize': num_articles,
+                'apiKey': self.news_api_key
+            }
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            articles = []
+            for article in data.get('articles', [])[:num_articles]:
+                articles.append({
+                    'title': article.get('title', 'No title'),
+                    'description': article.get('description', 'No description'),
+                    'url': article.get('url', '#'),
+                    'source': article.get('source', {}).get('name', 'Unknown')
+                })
+            return articles
+        except Exception as e:
+            print(f"Error fetching news for '{query}': {e}")
+            return []
+    
+    def fetch_nba_scores(self) -> List[Dict[str, Any]]:
+        """Fetch NBA scores from ESPN"""
+        try:
+            url = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            games = []
+            for event in data.get('events', []):
+                competitors = event.get('competitions', [{}])[0].get('competitors', [])
+                if len(competitors) >= 2:
+                    games.append({
+                        'home': competitors[0].get('team', {}).get('displayName', 'Team'),
+                        'away': competitors[1].get('team', {}).get('displayName', 'Team'),
+                        'home_score': str(competitors[0].get('score', '-')),
+                        'away_score': str(competitors[1].get('score', '-'))
+                    })
+            return games
+        except Exception as e:
+            print(f"Error fetching NBA scores: {e}")
+            return []
+    
+    def fetch_soccer_scores(self, league: str) -> List[Dict[str, Any]]:
+        """Fetch soccer scores from ESPN"""
+        try:
+            league_map = {
+                'premier-league': 'soccer/eng.1',
+                'champions-league': 'soccer/uefa.champions',
+                'europa-league': 'soccer/uefa.europa',
+                'championship': 'soccer/eng.2',
+                'fa-cup': 'soccer/eng.fa',
+                'carabao-cup': 'soccer/eng.cup'
+            }
+            
+            league_id = league_map.get(league, '')
+            if not league_id:
+                return []
+            
+            url = f"https://site.api.espn.com/apis/site/v2/sports/{league_id}/scoreboard"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            
+            games = []
+            for event in data.get('events', [])[:5]:
+                competitors = event.get('competitions', [{}])[0].get('competitors', [])
+                if len(competitors) >= 2:
+                    games.append({
+                        'home': competitors[0].get('team', {}).get('displayName', 'Team'),
+                        'away': competitors[1].get('team', {}).get('displayName', 'Team'),
+                        'home_score': str(competitors[0].get('score', '-')),
+                        'away_score': str(competitors[1].get('score', '-'))
+                    })
+            return games
+        except Exception as e:
+            print(f"Error fetching {league} scores: {e}")
+            return []
+    
+    def generate_html_digest(self) -> str:
+        """Generate the HTML email digest"""
+        date_str = datetime.now().strftime('%A, %B %d, %Y')
+        
+        html_parts = []
+        html_parts.append('<!DOCTYPE html>')
+        html_parts.append('<html>')
+        html_parts.append('<head>')
+        html_parts.append('<style>')
+        html_parts.append('body { font-family: Arial, sans-serif; background-color: #f5f5f5; }')
+        html_parts.append('.container { max-width: 900px; margin: 0 auto; background: white; padding: 20px; }')
+        html_parts.append('h1 { color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }')
+        html_parts.append('h2 { color: #007bff; margin-top: 30px; border-left: 4px solid #007bff; padding-left: 10px; }')
+        html_parts.append('h3 { color: #666; margin-top: 20px; }')
+        html_parts.append('.article { margin: 15px 0; padding: 15px; border-left: 4px solid #ddd; }')
+        html_parts.append('.article-title { font-weight: bold; color: #333; }')
+        html_parts.append('.article-summary { color: #666; font-size: 14px; margin: 5px 0; }')
+        html_parts.append('.article-source { color: #999; font-size: 12px; }')
+        html_parts.append('.article-link { color: #007bff; text-decoration: none; }')
+        html_parts.append('.score-item { padding: 10px; margin: 5px 0; background: #f9f9f9; border-radius: 4px; }')
+        html_parts.append('.score-teams { font-weight: bold; }')
+        html_parts.append('.score-final { color: #007bff; font-weight: bold; }')
+        html_parts.append('</style>')
+        html_parts.append('</head>')
+        html_parts.append('<body>')
+        html_parts.append('<div class="container">')
+        html_parts.append(f'<h1>Daily News Digest - {date_str}</h1>')
+        
+        # News sections
+        news_sections = {
+            'Top 5 US News': ('US news', 5),
+            'Top 5 Europe News': ('Europe news', 5),
+            'Top 5 Africa News': ('Africa news', 5),
+            'Top 3 India News': ('India news', 3),
+            'Top 3 China News': ('China news', 3),
+            'Top 5 NBA News': ('NBA basketball', 5),
+            'Top 5 NFL News': ('NFL football', 5),
+            'Top 5 Premier League News': ('English Premier League', 5),
+            'Top 2 West Ham News': ('West Ham United', 2),
+        }
+        
+        for section_title, (query, count) in news_sections.items():
+            articles = self.fetch_news(query, count)
+            html_parts.append(f'<h2>{section_title}</h2>')
+            
+            if articles:
+                for article in articles:
+                    summary = article['description'][:200] if article['description'] else 'No summary'
+                    html_parts.append('<div class="article">')
+                    html_parts.append(f'<div class="article-title">{article["title"]}</div>')
+                    html_parts.append(f'<div class="article-summary">{summary}...</div>')
+                    html_parts.append(f'<div class="article-source">{article["source"]}</div>')
+                    html_parts.append(f'<a href="{article["url"]}" class="article-link">Read more</a>')
+                    html_parts.append('</div>')
+            else:
+                html_parts.append('<p>No articles found.</p>')
+        
+        # NBA Scores
+        html_parts.append('<h2>NBA Scores</h2>')
+        nba_games = self.fetch_nba_scores()
+        if nba_games:
+            for game in nba_games:
+                html_parts.append('<div class="score-item">')
+                html_parts.append(f'<div class="score-teams">{game["away"]} @ {game["home"]}</div>')
+                html_parts.append(f'<div class="score-final">{game["away_score"]} - {game["home_score"]}</div>')
+                html_parts.append('</div>')
+        else:
+            html_parts.append('<p>No games to display.</p>')
+        
+        # Soccer Scores
+        html_parts.append('<h2>Soccer Scores</h2>')
+        soccer_leagues = {
+            'Premier League': 'premier-league',
+            'Champions League': 'champions-league',
+            'Europa League': 'europa-league',
+            'EFL Championship': 'championship',
+            'FA Cup': 'fa-cup',
+            'Carabao Cup': 'carabao-cup'
+        }
+        
+        for league_name, league_id in soccer_leagues.items():
+            games = self.fetch_soccer_scores(league_id)
+            html_parts.append(f'<h3>{league_name}</h3>')
+            if games:
+                for game in games:
+                    html_parts.append('<div class="score-item">')
+                    html_parts.append(f'<div class="score-teams">{game["away"]} vs {game["home"]}</div>')
+                    html_parts.append(f'<div class="score-final">{game["away_score"]} - {game["home_score"]}</div>')
+                    html_parts.append('</div>')
+            else:
+                html_parts.append('<p>No matches to display.</p>')
+        
+        html_parts.append('<hr>')
+        html_parts.append('<p style="text-align: center; color: #999; font-size: 12px;">Automated daily digest</p>')
+        html_parts.append('</div>')
+        html_parts.append('</body>')
+        html_parts.append('</html>')
+        
+        return '\n'.join(html_parts)
+    
+    def send_email(self, html_content: str):
+        """Send the digest via email"""
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"Daily News Digest - {datetime.now().strftime('%A, %B %d, %Y')}"
+            msg['From'] = self.sender_email
+            msg['To'] = self.recipient_email
+            
+            msg.attach(MIMEText(html_content, 'html'))
+            
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(self.sender_email, self.sender_password)
+                server.send_message(msg)
+            
+            print(f"Email sent successfully to {self.recipient_email}")
+        except Exception as e:
+            print(f"Error sending email: {e}")
+            raise
+
+def main():
+    try:
+        print("Starting daily news digest...")
+        generator = NewsDigestGenerator()
+        print("Generating digest...")
+        html_digest = generator.generate_html_digest()
+        print("Sending email...")
+        generator.send_email(html_digest)
+        print("Daily digest completed successfully!")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        exit(1)
+
+if __name__ == '__main__':
+    main()
